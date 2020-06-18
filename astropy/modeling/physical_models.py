@@ -10,11 +10,12 @@ import numpy as np
 
 from astropy import constants as const
 from astropy import units as u
+from astropy import cosmology
 from astropy.utils.exceptions import AstropyUserWarning
-from .core import Fittable1DModel
+from .core import Fittable1DModel, Fittable2DModel
 from .parameters import Parameter, InputParameterError
 
-__all__ = ["BlackBody", "Drude1D", "Plummer1D"]
+__all__ = ["BlackBody", "Drude1D", "Plummer1D", "NFW"]
 
 
 class BlackBody(Fittable1DModel):
@@ -371,3 +372,126 @@ class Plummer1D(Fittable1DModel):
     def _parameter_units_for_data_units(self, inputs_unit, outputs_unit):
         return {'mass': outputs_unit[self.outputs[0]] * inputs_unit[self.inputs[0]] ** 3,
                 'r_plum': inputs_unit[self.inputs[0]]}
+
+class NFW(Fittable2DModel):
+    """
+    Navarro–Frenk–White (NFW) profile - model for radial distribution of matter .
+
+    Parameters
+    ----------
+    TBD
+
+    See Also
+    --------
+    TBD
+
+    Notes
+    -----
+    TBD
+    """
+
+    # Model Parameters
+
+    # NFW Profile mass and mass type
+    mass = Parameter(default=1.0, min=0, unit=u.M_sun)
+    # Overdensity type and factor:
+    #   vir : virial radius
+    #   #c  : radius where density is # that of the critical density
+    #   #m  : radius where density is # that of the mean density
+    masstype = None
+
+    #NFW profile concentration
+    concentration = Parameter(default=1.0, min=0)
+
+    # NFW Profile redshift
+    redshift = Parameter(default=0.0)
+
+    # NFW Peak center
+    x_0 = Parameter(default=0)
+    y_0 = Parameter(default=0)
+
+    # Cosmology
+    cosmo = None
+
+    density_s = None
+    radius_s = None
+    _density_delta = None
+    _delta = None
+    _A_NFW = None
+
+    def __init__(self, massfactor="200c", cosmo=None, **kwargs):
+        # Set default cosmology
+        if cosmo is None:
+            cosmo = cosmology.default_cosmology.get()
+        else:
+            self.cosmo = cosmo
+
+        # Set mass type
+        if massfactor.lower() == "vir":
+            # Virial Mass
+            self.masstype = massfactor.lower()
+        elif massfactor[-1].lower() == 'c' or massfactor[-1].lower() == 'm':
+            # Critical or Mean Overdensity Mass
+            self._delta = massfactor[0:-1]
+            self.masstype = massfactor[-1].lower()
+        else:
+            raise Exception("Massfactor "+str(massfactor)+" not of the form '#m', '#c', or 'vir'")
+
+
+
+    #classmethod
+    def evaluate(self, x, y, x_0, y_0, mass, concentration, redshift):
+        """Two dimensional NFW profile function"""
+
+        # Set density from masstype specification
+        if self.masstype == "vir":
+            Om_c = self.cosmo.Om(redshift) - 1.0
+            d_c = 18.0 * np.pi**2 + 82.0 * Om_c - 39.0 * Om_c**2
+            self._density_delta = d_c * self.cosmo.critical_density(redshift)
+        elif self.masstype == 'c':
+            self._density_delta = self._delta * self.cosmo.critical_density(redshift)
+        elif self.masstype == 'm':
+            self._density_delta = self._delta * self.cosmo.critical_density(redshift) * self.cosmo.Om(redshift)
+        else:
+            raise Exception("Invalid masstype "+str(self.masstype)+". Should be one of 'vir','c', or 'm'")
+
+
+        # Calculate function:
+        self._A_NFW = np.log(1.0 + concentration) - (concentration / (1.0 + concentration))
+
+        # NFW Scale radius
+        # Delta Mass is related to delta radius by
+        # M_{200}=\frac{4}{3}\pi r_{200}^3 200 \rho_{c}
+        # And delta radius is related to the NFW scale radius by
+        # c = R / r_{\\rm s}
+        self.radius_s = (((3.0 * mass) / ( 4.0 * np.pi * self._density_delta)) ** (1.0 / 3.0)) / concentration
+
+        # NFW Scale density
+        self.density_s = mass / (4.0 * np.pi * self.radius_s ** 3 * self._A_NFW)
+
+        # Define reduced radius (r / r_{\\rm s})
+        radius_reduced = np.sqrt((x - x_0) ** 2 + (y - y_0) ** 2) / self.radius_s
+
+        # Density distribution
+        # \rho (r)=\frac{\rho_0}{\frac{r}{R_s}\left(1~+~\frac{r}{R_s}\right)^2}
+        density = self.density_s / (radius_reduced * (u.Quantity(1.0) + radius_reduced) ** 2)
+
+        return density
+
+    @property
+    def input_units(self):
+        if self.x_0.unit is None:
+            return None
+        return {self.inputs[0]: self.x_0.unit,
+                self.inputs[1]: self.y_0.unit}
+
+    def _parameter_units_for_data_units(self, inputs_unit, outputs_unit):
+        # Note that here we need to make sure that x and y are in the same
+        # units otherwise this can lead to issues since rotation is not well
+        # defined.
+        if inputs_unit[self.inputs[0]] != inputs_unit[self.inputs[1]]:
+            raise UnitsError("Units of 'x' and 'y' inputs should match")
+        return {'x_0': inputs_unit[self.inputs[0]],
+                'y_0': inputs_unit[self.inputs[0]],
+                'mass': u.M_sun}
+
